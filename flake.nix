@@ -10,9 +10,12 @@
 
     Algebraically:
       withDoc       : Package × String -> Package   -- augment execution with documentation
+      withDocs      : String -> Package -> Package   -- attach doc metadata (doc-first, curried)
+      mkHelpCli     : String × [Package] -> Package  -- fold documented packages into a help command
       withHelp      : Package -> Package             -- project the documentation, discard execution
       withExpansion : Package -> Package             -- unfold /nix/store references to a fixed point
       withTime      : Package -> Package             -- measure execution duration
+      withEnv       : Package × (String -> Bool)? × Descriptions? -> Package  -- print environment variables
 
     Standalone tools:
       nix-expand    : FilePath -> IO ()              -- withExpansion as a standalone app over arbitrary executables
@@ -218,6 +221,143 @@
             printf "[withTime] duration: %d.%03ds\n" "$__elapsed_s" "$__elapsed_ms"
             exit $__exit_code
           '';
+
+        # -----------------------------------------------------------------------
+        # withEnv : Package × (String -> Bool)? × Descriptions? -> Package
+        #
+        # Plain English:
+        #   Wraps a package so that when its executable runs, it first prints
+        #   all environment variables (one per line, sorted), then executes
+        #   the original command. An optional filter predicate controls which
+        #   variables are shown. An optional descriptions attrset provides
+        #   inline help: for each key whose `var` matches a printed variable,
+        #   a comment with `desc` is printed on the line above.
+        #
+        #   descriptions format: { <key> = { var = "VAR_NAME"; desc = "..."; }; ... }
+        #
+        # Algebraic characterisation:
+        #   Let E denote the environment as a finite map String -> String.
+        #   Let f : String -> Bool be the filter predicate (default: const true).
+        #   Let D be the partial description map.
+        #   withEnv(p, f, D) produces p' where:
+        #     exec(p') = print(annotate(D, filter(f, E))) ; exec(p)
+        #   withEnv is a natural transformation that observes (but does not
+        #   modify) the environment, prepending an IO action.
+        # -----------------------------------------------------------------------
+        # -----------------------------------------------------------------------
+        # withDocs : String -> Package -> Package
+        #
+        # Plain English:
+        #   Attaches a documentation string to a package as metadata (via the
+        #   __doc attribute) without altering its build or execution behaviour.
+        #   The doc-first argument order enables partial application:
+        #     map (withDocs "same description") [ pkg1 pkg2 ]
+        #
+        # Algebraic characterisation:
+        #   withDocs is a product injection: it embeds a package p into the
+        #   product Package × String by attaching a label, without modifying
+        #   the underlying morphism (exec is unchanged).
+        #   withDocs(s)(p) = p ⊗ s, where ⊗ denotes the product pairing.
+        # -----------------------------------------------------------------------
+        withDocs = doc: pkg: pkg // { __doc = doc; };
+
+        # -----------------------------------------------------------------------
+        # mkHelpCli : { pkgs, name, derivations } -> Package
+        #
+        # Plain English:
+        #   Folds a list of packages (typically annotated with withDocs) into a
+        #   single help-menu derivation. Each package's name and __doc string
+        #   are extracted and formatted into a columnar listing. The resulting
+        #   package is a shell script that prints this help text.
+        #
+        # Algebraic characterisation:
+        #   mkHelpCli is a catamorphism (fold) on List(Package):
+        #     mkHelpCli(name, [p₁, …, pₙ]) = writeScript(name, fold(format, pᵢ))
+        #   where format projects each pᵢ to its (name, __doc) pair and
+        #   fold concatenates the formatted lines into a single string.
+        # -----------------------------------------------------------------------
+        mkHelpCli = { pkgs, name, derivations }:
+          let
+            mkEntry = drv:
+              let
+                drvName = drv.meta.mainProgram or (builtins.parseDrvName drv.name).name;
+                doc = drv.__doc or "";
+                padWidth = 18;
+                padLen = let len = builtins.stringLength drvName;
+                         in if padWidth > len then padWidth - len else 1;
+                padding = builtins.concatStringsSep "" (builtins.genList (_: " ") padLen);
+              in
+              "  ${drvName}${padding}${doc}";
+            helpText = builtins.concatStringsSep "\n" (map mkEntry derivations);
+          in
+          pkgs.writeShellScriptBin name ''
+            cat <<'HELP'
+Unified dev CLI commands:
+
+${helpText}
+  ${name}              Show this help
+HELP
+          '';
+
+        withEnv = { pkgs, pkg, filter ? null, descriptions ? {} }:
+          let
+            name = pkg.meta.mainProgram or (builtins.parseDrvName pkg.name).name;
+
+            # Build an associative-array initialiser mapping VAR_NAME -> description
+            # from the descriptions attrset so the shell script can look up matches.
+            descEntries = builtins.attrValues (builtins.mapAttrs (_: v:
+              "  [${pkgs.lib.escapeShellArg v.var}]=${pkgs.lib.escapeShellArg v.desc}"
+            ) descriptions);
+            descInit = builtins.concatStringsSep "\n" descEntries;
+
+            # If a filter is provided, it is a Nix function String -> Bool.
+            # We materialise the set of allowed variable names at build time
+            # so the shell script only needs a hash-set lookup.
+            allowSet =
+              if filter == null then null
+              else
+                let
+                  descVarNames = map (v: v.var) (builtins.attrValues descriptions);
+                  candidates = descVarNames;
+                  allowed = builtins.filter filter candidates;
+                in
+                allowed;
+
+            filterSnippet =
+              if filter == null then ''
+                # no filter — print every variable
+                env | sort | while IFS='=' read -r __var __val; do
+                  if [[ -n "''${__descs[$__var]+x}" ]]; then
+                    echo "# ''${__descs[$__var]}"
+                  fi
+                  echo "$__var=$__val"
+                done
+              ''
+              else
+                let
+                  entries = map (v: "  [${pkgs.lib.escapeShellArg v}]=1") allowSet;
+                  init = builtins.concatStringsSep "\n" entries;
+                in ''
+                # filter to allowed variables
+                declare -A __allow=(
+                ${init}
+                )
+                env | sort | while IFS='=' read -r __var __val; do
+                  [[ -z "''${__allow[$__var]+x}" ]] && continue
+                  if [[ -n "''${__descs[$__var]+x}" ]]; then
+                    echo "# ''${__descs[$__var]}"
+                  fi
+                  echo "$__var=$__val"
+                done
+              '';
+          in
+          pkgs.writeShellScriptBin name ''
+            declare -A __descs=(
+            ${descInit}
+            )
+            ${filterSnippet}
+            exec ${pkg}/bin/${name} "$@"
+          '';
       };
 
       # ---------------------------------------------------------------------------
@@ -226,7 +366,7 @@
       packages = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          inherit (self.lib) withDoc withHelp withExpansion withTime;
+          inherit (self.lib) withDoc withDocs mkHelpCli withHelp withExpansion withTime withEnv;
         in
         {
           # -------------------------------------------------------------------
@@ -300,12 +440,42 @@
             pkg = pkgs.hello;
           };
 
+          # withEnv example: print all env vars before hello
+          hello-with-env = withEnv {
+            inherit pkgs;
+            pkg = pkgs.hello;
+          };
+
+          # withEnv example with filter and descriptions
+          hello-with-env-filtered = withEnv {
+            inherit pkgs;
+            pkg = pkgs.hello;
+            filter = name: builtins.elem name [ "HOME" "USER" "PATH" "SHELL" "TERM" ];
+            descriptions = {
+              home = { var = "HOME"; desc = "User's home directory"; };
+              user = { var = "USER"; desc = "Current logged-in username"; };
+              path = { var = "PATH"; desc = "Executable search path"; };
+              shell = { var = "SHELL"; desc = "User's default shell"; };
+              term = { var = "TERM"; desc = "Terminal type identifier"; };
+            };
+          };
+
           # Composition example: withDoc on top of withExpansion
           hello-composed = withDoc {
             inherit pkgs;
             pkg = withExpansion { inherit pkgs; pkg = pkgs.hello; };
             doc = "Composed: expansion + doc on GNU Hello.";
           };
+
+          # withDocs + mkHelpCli example: auto-generated help from documented derivations
+          demo-help =
+            let
+              documented = [
+                (withDocs "Prints a greeting" pkgs.hello)
+                (withDocs "Stream editor" pkgs.gnused)
+              ];
+            in
+            mkHelpCli { inherit pkgs; name = "demo-help"; derivations = documented; };
         }
       );
 

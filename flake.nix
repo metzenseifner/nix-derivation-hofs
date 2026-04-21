@@ -1,31 +1,53 @@
 {
   description = ''
-    Higher-order package combinators (with* family).
+      Higher-order package combinators (with* family).
 
-    Each combinator is a function Package -> ... -> Package, forming an
-    endofunctor on the category of Nix packages. Because the domain and
-    codomain are the same type, combinators compose freely:
+      Each combinator is a function Package -> ... -> Package, forming an
+      endofunctor on the category of Nix packages. Because the domain and
+      codomain are the same type, combinators compose freely:
 
-      withDoc (withHelp pkg) "some docs"
+        withDoc (withHelp pkg) "some docs"
 
-    Algebraically:
-      withDoc       : Package × String -> Package   -- augment execution with documentation
-      withDocs      : String -> Package -> Package   -- attach doc metadata (doc-first, curried)
-      mkHelpPkg     : String × [Package] -> Package  -- fold documented packages into a help command
-      withHelp      : Package -> Package             -- project the documentation, discard execution
-      withExpansion : Package -> Package             -- unfold /nix/store references to a fixed point
-      withTime      : Package -> Package             -- measure execution duration
-      withEnv       : Package × (String -> Bool)? × Descriptions? -> Package  -- print environment variables
+      Algebraically:
+        withDoc       : Package × String -> Package   -- augment execution with documentation
+        withDocs      : String -> Package -> Package   -- attach doc metadata (doc-first, curried)
+        mkHelpPkg     : String × [Package] -> Package  -- fold documented packages into a help command
+        withHelp      : Package -> Package             -- project the documentation, discard execution
+        withExpansion : Package -> Package             -- unfold /nix/store references to a fixed point
+        withTime      : Package -> Package             -- measure execution duration
+        withEnv       : Package × (String -> Bool)? × Descriptions? -> Package  -- print environment variables
 
-    Standalone tools:
-      nix-expand    : FilePath -> IO ()              -- withExpansion as a standalone app over arbitrary executables
+      Standalone tools:
+        nix-expand    : FilePath -> IO ()              -- withExpansion as a standalone app over arbitrary executables
+
+       Key functional patterns at play
+
+    ┌──────────────────────┬────────────────┬───────────────────────────────────────────────────────────────┐
+    │       Pattern        │     Where      │                         What it does                          │
+    ├──────────────────────┼────────────────┼───────────────────────────────────────────────────────────────┤
+    │ Decorator (//)       │ withDocs       │ Augments a derivation with metadata without altering its      │
+    │                      │                │ build                                                         │
+    ├──────────────────────┼────────────────┼───────────────────────────────────────────────────────────────┤
+    │ Functor map          │ documented     │ Lifts withDocs uniformly over the closure                     │
+    │ (mapAttrs)           │                │                                                               │
+    ├──────────────────────┼────────────────┼───────────────────────────────────────────────────────────────┤
+    │ Catamorphism (fold)  │ mkHelpCli      │ Collapses [Package] into a single help Package                │
+    ├──────────────────────┼────────────────┼───────────────────────────────────────────────────────────────┤
+    │ Partial application  │ withDocs       │ Doc-first arg order lets you curry: map (withDocs "same doc") │
+    │                      │ "desc"         │  [a b c]                                                      │
+    └──────────────────────┴────────────────┴───────────────────────────────────────────────────────────────┘
+
+    The __doc convention keeps the doc co-located with the derivation through composition — if you later do
+    withTime (withDocs "desc" pkg), the __doc survives because withTime returns a new derivation via
+    writeShellScriptBin, but you'd want mkHelpCli to reference the documented versions, not the composed ones.
   '';
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   };
 
-  outputs = { self, nixpkgs }:
+  outputs =
+    { self, nixpkgs }:
     let
       forAllSystems = nixpkgs.lib.genAttrs [
         "x86_64-linux"
@@ -116,7 +138,12 @@
         #   withDoc is a natural transformation that prepends an IO action
         #   while preserving the rest of the program's behaviour.
         # -----------------------------------------------------------------------
-        withDoc = { pkgs, pkg, doc }:
+        withDoc =
+          {
+            pkgs,
+            pkg,
+            doc,
+          }:
           let
             name = pkg.meta.mainProgram or (builtins.parseDrvName pkg.name).name;
           in
@@ -139,7 +166,8 @@
         #   Equivalently, withHelp factors through the "show" homomorphism
         #   from Package to String, then lifts back via print.
         # -----------------------------------------------------------------------
-        withHelp = { pkgs, pkg }:
+        withHelp =
+          { pkgs, pkg }:
           let
             name = pkg.meta.mainProgram or (builtins.parseDrvName pkg.name).name;
           in
@@ -171,7 +199,8 @@
         #   lattice under ⊆).
         #   withExpansion(p) prints each element of S* before exec(p).
         # -----------------------------------------------------------------------
-        withExpansion = { pkgs, pkg }:
+        withExpansion =
+          { pkgs, pkg }:
           let
             name = pkg.meta.mainProgram or (builtins.parseDrvName pkg.name).name;
             entrypoint = "${pkg}/bin/${name}";
@@ -201,7 +230,8 @@
         #   preserving the original exit code (the return value is the
         #   identity on the exit-code component).
         # -----------------------------------------------------------------------
-        withTime = { pkgs, pkg }:
+        withTime =
+          { pkgs, pkg }:
           let
             name = pkg.meta.mainProgram or (builtins.parseDrvName pkg.name).name;
           in
@@ -276,45 +306,63 @@
         #   where format projects each pᵢ to its (name, __doc) pair and
         #   fold concatenates the formatted lines into a single string.
         # -----------------------------------------------------------------------
-        mkHelpPkg = { pkgs, name, derivations }:
+        mkHelpPkg =
+          {
+            pkgs,
+            name,
+            derivations,
+          }:
           let
-            mkEntry = drv:
+            mkEntry =
+              drv:
               let
                 drvName = drv.meta.mainProgram or (builtins.parseDrvName drv.name).name;
                 doc = drv.__doc or "";
                 padWidth = 18;
-                padLen = let len = builtins.stringLength drvName;
-                         in if padWidth > len then padWidth - len else 1;
+                padLen =
+                  let
+                    len = builtins.stringLength drvName;
+                  in
+                  if padWidth > len then padWidth - len else 1;
                 padding = builtins.concatStringsSep "" (builtins.genList (_: " ") padLen);
               in
               "  ${drvName}${padding}${doc}";
             helpText = builtins.concatStringsSep "\n" (map mkEntry derivations);
           in
           pkgs.writeShellScriptBin name ''
-            cat <<'HELP'
-Unified dev CLI commands:
+                        cat <<'HELP'
+            Unified dev CLI commands:
 
-${helpText}
-  ${name}              Show this help
-HELP
+            ${helpText}
+              ${name}              Show this help
+            HELP
           '';
 
-        withEnv = { pkgs, pkg, filter ? null, descriptions ? {} }:
+        withEnv =
+          {
+            pkgs,
+            pkg,
+            filter ? null,
+            descriptions ? { },
+          }:
           let
             name = pkg.meta.mainProgram or (builtins.parseDrvName pkg.name).name;
 
             # Build an associative-array initialiser mapping VAR_NAME -> description
             # from the descriptions attrset so the shell script can look up matches.
-            descEntries = builtins.attrValues (builtins.mapAttrs (_: v:
-              "  [${pkgs.lib.escapeShellArg v.var}]=${pkgs.lib.escapeShellArg v.desc}"
-            ) descriptions);
+            descEntries = builtins.attrValues (
+              builtins.mapAttrs (
+                _: v: "  [${pkgs.lib.escapeShellArg v.var}]=${pkgs.lib.escapeShellArg v.desc}"
+              ) descriptions
+            );
             descInit = builtins.concatStringsSep "\n" descEntries;
 
             # If a filter is provided, it is a Nix function String -> Bool.
             # We materialise the set of allowed variable names at build time
             # so the shell script only needs a hash-set lookup.
             allowSet =
-              if filter == null then null
+              if filter == null then
+                null
               else
                 let
                   descVarNames = map (v: v.var) (builtins.attrValues descriptions);
@@ -324,32 +372,34 @@ HELP
                 allowed;
 
             filterSnippet =
-              if filter == null then ''
-                # no filter — print every variable
-                env | sort | while IFS='=' read -r __var __val; do
-                  if [[ -n "''${__descs[$__var]+x}" ]]; then
-                    echo "# ''${__descs[$__var]}"
-                  fi
-                  echo "$__var=$__val"
-                done
-              ''
+              if filter == null then
+                ''
+                  # no filter — print every variable
+                  env | sort | while IFS='=' read -r __var __val; do
+                    if [[ -n "''${__descs[$__var]+x}" ]]; then
+                      echo "# ''${__descs[$__var]}"
+                    fi
+                    echo "$__var=$__val"
+                  done
+                ''
               else
                 let
                   entries = map (v: "  [${pkgs.lib.escapeShellArg v}]=1") allowSet;
                   init = builtins.concatStringsSep "\n" entries;
-                in ''
-                # filter to allowed variables
-                declare -A __allow=(
-                ${init}
-                )
-                env | sort | while IFS='=' read -r __var __val; do
-                  [[ -z "''${__allow[$__var]+x}" ]] && continue
-                  if [[ -n "''${__descs[$__var]+x}" ]]; then
-                    echo "# ''${__descs[$__var]}"
-                  fi
-                  echo "$__var=$__val"
-                done
-              '';
+                in
+                ''
+                  # filter to allowed variables
+                  declare -A __allow=(
+                  ${init}
+                  )
+                  env | sort | while IFS='=' read -r __var __val; do
+                    [[ -z "''${__allow[$__var]+x}" ]] && continue
+                    if [[ -n "''${__descs[$__var]+x}" ]]; then
+                      echo "# ''${__descs[$__var]}"
+                    fi
+                    echo "$__var=$__val"
+                  done
+                '';
           in
           pkgs.writeShellScriptBin name ''
             declare -A __descs=(
@@ -363,10 +413,19 @@ HELP
       # ---------------------------------------------------------------------------
       # packages: smoke-test examples for each combinator + nix-expand tool
       # ---------------------------------------------------------------------------
-      packages = forAllSystems (system:
+      packages = forAllSystems (
+        system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          inherit (self.lib) withDoc withDocs mkHelpPkg withHelp withExpansion withTime withEnv;
+          inherit (self.lib)
+            withDoc
+            withDocs
+            mkHelpPkg
+            withHelp
+            withExpansion
+            withTime
+            withEnv
+            ;
         in
         {
           # -------------------------------------------------------------------
@@ -450,20 +509,46 @@ HELP
           hello-with-env-filtered = withEnv {
             inherit pkgs;
             pkg = pkgs.hello;
-            filter = name: builtins.elem name [ "HOME" "USER" "PATH" "SHELL" "TERM" ];
+            filter =
+              name:
+              builtins.elem name [
+                "HOME"
+                "USER"
+                "PATH"
+                "SHELL"
+                "TERM"
+              ];
             descriptions = {
-              home = { var = "HOME"; desc = "User's home directory"; };
-              user = { var = "USER"; desc = "Current logged-in username"; };
-              path = { var = "PATH"; desc = "Executable search path"; };
-              shell = { var = "SHELL"; desc = "User's default shell"; };
-              term = { var = "TERM"; desc = "Terminal type identifier"; };
+              home = {
+                var = "HOME";
+                desc = "User's home directory";
+              };
+              user = {
+                var = "USER";
+                desc = "Current logged-in username";
+              };
+              path = {
+                var = "PATH";
+                desc = "Executable search path";
+              };
+              shell = {
+                var = "SHELL";
+                desc = "User's default shell";
+              };
+              term = {
+                var = "TERM";
+                desc = "Terminal type identifier";
+              };
             };
           };
 
           # Composition example: withDoc on top of withExpansion
           hello-composed = withDoc {
             inherit pkgs;
-            pkg = withExpansion { inherit pkgs; pkg = pkgs.hello; };
+            pkg = withExpansion {
+              inherit pkgs;
+              pkg = pkgs.hello;
+            };
             doc = "Composed: expansion + doc on GNU Hello.";
           };
 
@@ -475,7 +560,11 @@ HELP
                 (withDocs "Stream editor" pkgs.gnused)
               ];
             in
-            mkHelpPkg { inherit pkgs; name = "demo-help"; derivations = documented; };
+            mkHelpPkg {
+              inherit pkgs;
+              name = "demo-help";
+              derivations = documented;
+            };
         }
       );
 

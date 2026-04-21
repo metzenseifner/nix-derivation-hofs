@@ -11,7 +11,7 @@
     Algebraically:
       withDoc       : Package × String -> Package   -- augment execution with documentation
       withDocs      : String -> Package -> Package   -- attach doc metadata (doc-first, curried)
-      mkHelpCli     : String × [Package] -> Package  -- fold documented packages into a help command
+      mkHelpPkg     : String × [Package] -> Package  -- fold documented packages into a help command
       withHelp      : Package -> Package             -- project the documentation, discard execution
       withExpansion : Package -> Package             -- unfold /nix/store references to a fixed point
       withTime      : Package -> Package             -- measure execution duration
@@ -262,7 +262,7 @@
         withDocs = doc: pkg: pkg // { __doc = doc; };
 
         # -----------------------------------------------------------------------
-        # mkHelpCli : { pkgs, name, derivations } -> Package
+        # mkHelpPkg : { pkgs, name, derivations } -> Package
         #
         # Plain English:
         #   Folds a list of packages (typically annotated with withDocs) into a
@@ -271,12 +271,12 @@
         #   package is a shell script that prints this help text.
         #
         # Algebraic characterisation:
-        #   mkHelpCli is a catamorphism (fold) on List(Package):
-        #     mkHelpCli(name, [p₁, …, pₙ]) = writeScript(name, fold(format, pᵢ))
+        #   mkHelpPkg is a catamorphism (fold) on List(Package):
+        #     mkHelpPkg(name, [p₁, …, pₙ]) = writeScript(name, fold(format, pᵢ))
         #   where format projects each pᵢ to its (name, __doc) pair and
         #   fold concatenates the formatted lines into a single string.
         # -----------------------------------------------------------------------
-        mkHelpCli = { pkgs, name, derivations }:
+        mkHelpPkg = { pkgs, name, derivations }:
           let
             mkEntry = drv:
               let
@@ -366,7 +366,7 @@ HELP
       packages = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          inherit (self.lib) withDoc withDocs mkHelpCli withHelp withExpansion withTime withEnv;
+          inherit (self.lib) withDoc withDocs mkHelpPkg withHelp withExpansion withTime withEnv;
         in
         {
           # -------------------------------------------------------------------
@@ -467,7 +467,7 @@ HELP
             doc = "Composed: expansion + doc on GNU Hello.";
           };
 
-          # withDocs + mkHelpCli example: auto-generated help from documented derivations
+          # withDocs + mkHelpPkg example: auto-generated help from documented derivations
           demo-help =
             let
               documented = [
@@ -475,7 +475,7 @@ HELP
                 (withDocs "Stream editor" pkgs.gnused)
               ];
             in
-            mkHelpCli { inherit pkgs; name = "demo-help"; derivations = documented; };
+            mkHelpPkg { inherit pkgs; name = "demo-help"; derivations = documented; };
         }
       );
 

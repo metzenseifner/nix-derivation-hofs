@@ -253,37 +253,15 @@
           '';
 
         # -----------------------------------------------------------------------
-        # withEnv : Package × (String -> Bool)? × Descriptions? -> Package
-        #
-        # Plain English:
-        #   Wraps a package so that when its executable runs, it first prints
-        #   all environment variables (one per line, sorted), then executes
-        #   the original command. An optional filter predicate controls which
-        #   variables are shown. An optional descriptions attrset provides
-        #   inline help: for each key whose `var` matches a printed variable,
-        #   a comment with `desc` is printed on the line above.
-        #
-        #   descriptions format: { <key> = { var = "VAR_NAME"; desc = "..."; }; ... }
-        #
-        # Algebraic characterisation:
-        #   Let E denote the environment as a finite map String -> String.
-        #   Let f : String -> Bool be the filter predicate (default: const true).
-        #   Let D be the partial description map.
-        #   withEnv(p, f, D) produces p' where:
-        #     exec(p') = print(annotate(D, filter(f, E))) ; exec(p)
-        #   withEnv is a natural transformation that observes (but does not
-        #   modify) the environment, prepending an IO action.
-        # -----------------------------------------------------------------------
-        # -----------------------------------------------------------------------
         # withDocs : String -> Package -> Package
         #
         # Plain English:
         #   Attaches a documentation string to a package as metadata (via the
-        #   __doc attribute) without altering its build or execution behaviour.
+        #   __doc attribute) without altering its build or execution behavior.
         #   The doc-first argument order enables partial application:
         #     map (withDocs "same description") [ pkg1 pkg2 ]
         #
-        # Algebraic characterisation:
+        # Algebraic characterization:
         #   withDocs is a product injection: it embeds a package p into the
         #   product Package × String by attaching a label, without modifying
         #   the underlying morphism (exec is unchanged).
@@ -338,6 +316,28 @@
             HELP
           '';
 
+        # -----------------------------------------------------------------------
+        # withEnv : Package × (String -> Bool)? × Descriptions? -> Package
+        #
+        # Plain English:
+        #   Wraps a package so that when its executable runs, it first prints
+        #   all environment variables (one per line, sorted), then executes
+        #   the original command. An optional filter predicate controls which
+        #   variables are shown. An optional descriptions attrset provides
+        #   inline help: for each key whose `var` matches a printed variable,
+        #   a comment with `desc` is printed on the line above.
+        #
+        #   descriptions format: { <key> = { var = "VAR_NAME"; desc = "..."; }; ... }
+        #
+        # Algebraic characterisation:
+        #   Let E denote the environment as a finite map String -> String.
+        #   Let f : String -> Bool be the filter predicate (default: const true).
+        #   Let D be the partial description map.
+        #   withEnv(p, f, D) produces p' where:
+        #     exec(p') = print(annotate(D, filter(f, E))) ; exec(p)
+        #   withEnv is a natural transformation that observes (but does not
+        #   modify) the environment, prepending an IO action.
+        # -----------------------------------------------------------------------
         withEnv =
           {
             pkgs,

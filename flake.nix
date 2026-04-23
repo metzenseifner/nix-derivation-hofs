@@ -6,13 +6,13 @@
       endofunctor on the category of Nix packages. Because the domain and
       codomain are the same type, combinators compose freely:
 
-        withDoc (withHelp pkg) "some docs"
+        withHelp (withUnexecuted pkg) "some docs"
 
       Algebraically:
-        withDoc       : Package × String -> Package   -- augment execution with documentation
-        withDocs      : String -> Package -> Package   -- attach doc metadata (doc-first, curried)
+        withHelp       : Package × String -> Package   -- augment execution with documentation
+        withHelps      : String -> Package -> Package   -- attach doc metadata (doc-first, curried)
         mkHelpPkg     : String × [Package] -> Package  -- fold documented packages into a help command
-        withHelp      : Package -> Package             -- project the documentation, discard execution
+        withUnexecuted      : Package -> Package             -- project the documentation, discard execution
         withExpansion : Package -> Package             -- unfold /nix/store references to a fixed point
         withTime      : Package -> Package             -- measure execution duration
         withEnv       : Package × (String -> Bool)? × Descriptions? -> Package  -- print environment variables
@@ -25,20 +25,20 @@
     ┌──────────────────────┬────────────────┬───────────────────────────────────────────────────────────────┐
     │       Pattern        │     Where      │                         What it does                          │
     ├──────────────────────┼────────────────┼───────────────────────────────────────────────────────────────┤
-    │ Decorator (//)       │ withDocs       │ Augments a derivation with metadata without altering its      │
+    │ Decorator (//)       │ withHelps       │ Augments a derivation with metadata without altering its      │
     │                      │                │ build                                                         │
     ├──────────────────────┼────────────────┼───────────────────────────────────────────────────────────────┤
-    │ Functor map          │ documented     │ Lifts withDocs uniformly over the closure                     │
+    │ Functor map          │ documented     │ Lifts withHelps uniformly over the closure                     │
     │ (mapAttrs)           │                │                                                               │
     ├──────────────────────┼────────────────┼───────────────────────────────────────────────────────────────┤
     │ Catamorphism (fold)  │ mkHelpCli      │ Collapses [Package] into a single help Package                │
     ├──────────────────────┼────────────────┼───────────────────────────────────────────────────────────────┤
-    │ Partial application  │ withDocs       │ Doc-first arg order lets you curry: map (withDocs "same doc") │
+    │ Partial application  │ withHelps       │ Doc-first arg order lets you curry: map (withHelps "same doc") │
     │                      │ "desc"         │  [a b c]                                                      │
     └──────────────────────┴────────────────┴───────────────────────────────────────────────────────────────┘
 
     The __doc convention keeps the doc co-located with the derivation through composition — if you later do
-    withTime (withDocs "desc" pkg), the __doc survives because withTime returns a new derivation via
+    withTime (withHelps "desc" pkg), the __doc survives because withTime returns a new derivation via
     writeShellScriptBin, but you'd want mkHelpCli to reference the documented versions, not the composed ones.
   '';
 
@@ -125,7 +125,7 @@
       lib = {
 
         # -----------------------------------------------------------------------
-        # withDoc : Package × String -> Package
+        # withHelp : Package × String -> Package
         #
         # Plain English:
         #   Wraps a package so that every time its executable runs, the given
@@ -134,11 +134,11 @@
         #
         # Algebraic characterisation:
         #   Let exec(p) denote the side-effect of running package p.
-        #   withDoc(p, s) produces p' where exec(p') = print(s) ; exec(p).
-        #   withDoc is a natural transformation that prepends an IO action
+        #   withHelp(p, s) produces p' where exec(p') = print(s) ; exec(p).
+        #   withHelp is a natural transformation that prepends an IO action
         #   while preserving the rest of the program's behaviour.
         # -----------------------------------------------------------------------
-        withDoc =
+        withHelp =
           {
             pkgs,
             pkg,
@@ -153,7 +153,7 @@
           '';
 
         # -----------------------------------------------------------------------
-        # withHelp : Package -> Package
+        # withUnexecuted : Package -> Package
         #
         # Plain English:
         #   Produces a new package named "<original>-help" whose sole purpose
@@ -161,12 +161,12 @@
         #   actually runs it. Useful for introspecting wrapped commands.
         #
         # Algebraic characterisation:
-        #   withHelp is a projection: it maps exec(p) to print(path(p)),
+        #   withUnexecuted is a projection: it maps exec(p) to print(path(p)),
         #   discarding the effectful component.
-        #   Equivalently, withHelp factors through the "show" homomorphism
+        #   Equivalently, withUnexecuted factors through the "show" homomorphism
         #   from Package to String, then lifts back via print.
         # -----------------------------------------------------------------------
-        withHelp =
+        withUnexecuted =
           { pkgs, pkg }:
           let
             name = pkg.meta.mainProgram or (builtins.parseDrvName pkg.name).name;
@@ -253,27 +253,27 @@
           '';
 
         # -----------------------------------------------------------------------
-        # withDocs : String -> Package -> Package
+        # withHelps : String -> Package -> Package
         #
         # Plain English:
         #   Attaches a documentation string to a package as metadata (via the
         #   __doc attribute) without altering its build or execution behavior.
         #   The doc-first argument order enables partial application:
-        #     map (withDocs "same description") [ pkg1 pkg2 ]
+        #     map (withHelps "same description") [ pkg1 pkg2 ]
         #
         # Algebraic characterization:
-        #   withDocs is a product injection: it embeds a package p into the
+        #   withHelps is a product injection: it embeds a package p into the
         #   product Package × String by attaching a label, without modifying
         #   the underlying morphism (exec is unchanged).
-        #   withDocs(s)(p) = p ⊗ s, where ⊗ denotes the product pairing.
+        #   withHelps(s)(p) = p ⊗ s, where ⊗ denotes the product pairing.
         # -----------------------------------------------------------------------
-        withDocs = doc: pkg: pkg // { __doc = doc; };
+        withHelps = doc: pkg: pkg // { __doc = doc; };
 
         # -----------------------------------------------------------------------
         # mkHelpPkg : { pkgs, name, derivations } -> Package
         #
         # Plain English:
-        #   Folds a list of packages (typically annotated with withDocs) into a
+        #   Folds a list of packages (typically annotated with withHelps) into a
         #   single help-menu derivation. Each package's name and __doc string
         #   are extracted and formatted into a columnar listing. The resulting
         #   package is a shell script that prints this help text.
@@ -418,10 +418,10 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           inherit (self.lib)
-            withDoc
-            withDocs
-            mkHelpPkg
             withHelp
+            withHelps
+            mkHelpPkg
+            withUnexecuted
             withExpansion
             withTime
             withEnv
@@ -474,15 +474,15 @@
             __expand "$target"
           '';
 
-          # withDoc example: hello with a doc banner
-          hello-with-doc = withDoc {
+          # withHelp example: hello with a doc banner
+          hello-with-doc = withHelp {
             inherit pkgs;
             pkg = pkgs.hello;
             doc = "GNU Hello — prints a greeting message.";
           };
 
-          # withHelp example: show hello's real path
-          hello-help = withHelp {
+          # withUnexecuted example: show hello's real path
+          hello-help = withUnexecuted {
             inherit pkgs;
             pkg = pkgs.hello;
           };
@@ -542,8 +542,8 @@
             };
           };
 
-          # Composition example: withDoc on top of withExpansion
-          hello-composed = withDoc {
+          # Composition example: withHelp on top of withExpansion
+          hello-composed = withHelp {
             inherit pkgs;
             pkg = withExpansion {
               inherit pkgs;
@@ -552,12 +552,12 @@
             doc = "Composed: expansion + doc on GNU Hello.";
           };
 
-          # withDocs + mkHelpPkg example: auto-generated help from documented derivations
+          # withHelps + mkHelpPkg example: auto-generated help from documented derivations
           demo-help =
             let
               documented = [
-                (withDocs "Prints a greeting" pkgs.hello)
-                (withDocs "Stream editor" pkgs.gnused)
+                (withHelps "Prints a greeting" pkgs.hello)
+                (withHelps "Stream editor" pkgs.gnused)
               ];
             in
             mkHelpPkg {

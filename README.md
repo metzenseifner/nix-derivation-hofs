@@ -3,21 +3,25 @@
 How could I compose `withTime`, `withHelps`, `withEnv`, and `withExpansion` into a new function called `withExtras`?
 
 
-The challenge is that these four functions have different signatures:
+All four are now config-first and curried — each takes a configuration attrset
+and returns an endofunctor `Package -> Package`:
 
-┌───────────────┬──────────────────────────────────────────────────┐
-│   Function    │                    Signature                     │
-├───────────────┼──────────────────────────────────────────────────┤
-│ withTime      │ { pkgs, pkg } -> Package                         │
-├───────────────┼──────────────────────────────────────────────────┤
-│ withHelps      │ String -> Package -> Package                     │
-├───────────────┼──────────────────────────────────────────────────┤
-│ withEnv       │ { pkgs, pkg, filter?, descriptions? } -> Package │
-├───────────────┼──────────────────────────────────────────────────┤
-│ withExpansion │ { pkgs, pkg } -> Package                         │
-└───────────────┴──────────────────────────────────────────────────┘
+┌───────────────┬────────────────────────────────────────────────────────┐
+│   Function    │                       Signature                        │
+├───────────────┼────────────────────────────────────────────────────────┤
+│ withTime      │ { pkgs } -> Package -> Package                         │
+├───────────────┼────────────────────────────────────────────────────────┤
+│ withHelps     │ String -> Package -> Package                          │
+├───────────────┼────────────────────────────────────────────────────────┤
+│ withEnv       │ { pkgs, filter?, descriptions? } -> Package -> Package │
+├───────────────┼────────────────────────────────────────────────────────┤
+│ withExpansion │ { pkgs } -> Package -> Package                         │
+└───────────────┴────────────────────────────────────────────────────────┘
 
-`withHelps` is the odd one out — it's curried and only attaches metadata (no wrapping). The other three create new wrapper derivations via `writeShellScriptBin`.
+`withHelps` only attaches metadata (no wrapping); the other three create new
+wrapper derivations via `writeShellScriptBin`. Since every one is `Config ->
+Package -> Package`, applying the config first yields a uniform `Package ->
+Package` morphism, so they all drop straight into a composition pipeline.
 
 ## Strategies 
 
@@ -29,9 +33,9 @@ Here are a few composition strategies:
 withExtras =
   { pkgs, pkg, doc ? null, filter ? null, descriptions ? {} }:
   let
-    p1 = withTime { inherit pkgs; pkg = pkg; };
-    p2 = withEnv { inherit pkgs filter descriptions; pkg = p1; };
-    p3 = withExpansion { inherit pkgs; pkg = p2; };
+    p1 = withTime { inherit pkgs; } pkg;
+    p2 = withEnv { inherit pkgs filter descriptions; } p1;
+    p3 = withExpansion { inherit pkgs; } p2;
   in
   if doc != null then withHelps doc p3 else p3;
 ```
@@ -39,6 +43,10 @@ withExtras =
 This is straightforward but creates 3 nested wrapper scripts. Execution order (outermost first): `expansion → env → time → original`.
 
 2. Kleisli-style composition with a combinator
+
+Because every combinator is already `Config -> (Package -> Package)`, fixing the
+config gives you the `Package -> Package` morphisms directly — no `pkg: ...`
+lambdas needed.
 
 # compose : [Package -> Package] -> Package -> Package
 `compose = builtins.foldl' (acc: f: pkg: f (acc pkg)) (pkg: pkg);`
@@ -48,9 +56,9 @@ withExtras =
   { pkgs, doc ? null, filter ? null, descriptions ? {} }:
   let
     pipeline = [
-      (pkg: withTime { inherit pkgs; inherit pkg; })
-      (pkg: withEnv { inherit pkgs pkg filter descriptions; })
-      (pkg: withExpansion { inherit pkgs; inherit pkg; })
+      (withTime { inherit pkgs; })
+      (withEnv { inherit pkgs filter descriptions; })
+      (withExpansion { inherit pkgs; })
     ] ++ pkgs.lib.optional (doc != null) (withHelps doc);
   in
   compose pipeline;
@@ -73,13 +81,13 @@ withExtras =
     (p: f: f p)
     pkg
     ([
-      (p: withTime { inherit pkgs; pkg = p; })
-      (p: withExpansion { inherit pkgs; pkg = p; })
-      (p: withEnv { inherit pkgs; pkg = p; inherit filter descriptions; })
+      (withTime { inherit pkgs; })
+      (withExpansion { inherit pkgs; })
+      (withEnv { inherit pkgs filter descriptions; })
     ] ++ pkgs.lib.optional (doc != null) (withHelps doc));
 ```
 
-This matches the `{ pkgs, pkg, ... }` pattern of your other combinators and reads naturally:
+This matches the config-first, curried convention of the other combinators and reads naturally:
 
 ```
 hello-extras = withExtras {
@@ -89,6 +97,6 @@ hello-extras = withExtras {
 };
 ```
 
-Option 3 fits the existing API style (attrset args, pkg
-in / Package out), the `foldl'` makes the pipeline explicit and reorderable,
-and optional params like doc/filter/descriptions only activate when provided.
+Option 3 fits the API style (config-first, `Package -> Package` out), the
+`foldl'` makes the pipeline explicit and reorderable, and optional params like
+doc/filter/descriptions only activate when provided.

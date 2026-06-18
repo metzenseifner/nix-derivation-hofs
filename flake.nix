@@ -2,20 +2,22 @@
   description = ''
       Higher-order package combinators (with* family).
 
-      Each combinator is a function Package -> ... -> Package, forming an
-      endofunctor on the category of Nix packages. Because the domain and
-      codomain are the same type, combinators compose freely:
+      Each combinator is config-first and curried: it takes a configuration
+      attrset and returns an endofunctor Package -> Package on the category of
+      Nix packages. Fixing the config yields a reusable wrapper, and because
+      the wrapper's domain and codomain are the same type they compose freely:
 
-        withHelp (withUnexecuted pkg) "some docs"
+        withHelp { inherit pkgs; doc = "some docs"; } (withUnexecuted { inherit pkgs; } pkg)
 
-      Algebraically:
-        withHelp       : Package × String -> Package   -- augment execution with documentation
-        withHelps      : String -> Package -> Package   -- attach doc metadata (doc-first, curried)
-        mkHelpPkg     : String × [Package] -> Package  -- fold documented packages into a help command
-        withUnexecuted      : Package -> Package             -- project the documentation, discard execution
-        withExpansion : Package -> Package             -- unfold /nix/store references to a fixed point
-        withTime      : Package -> Package             -- measure execution duration
-        withEnv       : Package × (String -> Bool)? × Descriptions? -> Package  -- print environment variables
+      Algebraically (Config is an attrset that always carries pkgs):
+        withHelp       : { pkgs, doc } -> Package -> Package        -- augment execution with documentation
+        withHelps      : String -> Package -> Package               -- attach doc metadata (doc-first, curried)
+        mkHelpPkg      : { pkgs, name, derivations } -> Package     -- fold documented packages into a help command
+        withUnexecuted : { pkgs } -> Package -> Package             -- project the documentation, discard execution
+        withExpansion  : { pkgs } -> Package -> Package             -- unfold /nix/store references to a fixed point
+        withSource     : { pkgs, depth?, execute? } -> Package -> Package  -- print the implementation (depth-bounded), then optionally execute
+        withTime       : { pkgs } -> Package -> Package             -- measure execution duration
+        withEnv        : { pkgs, filter?, descriptions? } -> Package -> Package  -- print environment variables
 
       Standalone tools:
         nix-expand    : FilePath -> IO ()              -- withExpansion as a standalone app over arbitrary executables
@@ -76,13 +78,22 @@
           [[ "$mime" == "binary" ]]
         }
 
+        # __expand <entrypoint> [max_depth]
+        #   max_depth empty/unset => traverse to the fixed point (infinite).
+        #   max_depth = N         => print depths 0..N inclusive, then stop.
+        #   depth 0 is the entrypoint itself; each subsequent depth is one more
+        #   layer of /nix/store references unfolded from the previous layer.
         __expand() {
           local entrypoint="$1"
+          local max_depth="''${2:-}"
           local -A seen=()
           local -a frontier=( "$entrypoint" )
           local depth=0
 
           while [[ ''${#frontier[@]} -gt 0 ]]; do
+            if [[ -n "$max_depth" && "$depth" -gt "$max_depth" ]]; then
+              break
+            fi
             local -a next_frontier=()
             echo "--- depth $depth ---"
 
@@ -125,25 +136,27 @@
       lib = {
 
         # -----------------------------------------------------------------------
-        # withHelp : Package × String -> Package
+        # withHelp : { pkgs, doc } -> Package -> Package
         #
         # Plain English:
-        #   Wraps a package so that every time its executable runs, the given
-        #   documentation string is printed to stdout first, then the original
-        #   command executes normally with all arguments forwarded.
+        #   Config-first and curried. Given { pkgs, doc }, returns a
+        #   Package -> Package wrapper. Applied to a package, every time its
+        #   executable runs the documentation string is printed to stdout
+        #   first, then the original command executes normally with all
+        #   arguments forwarded.
         #
         # Algebraic characterisation:
         #   Let exec(p) denote the side-effect of running package p.
-        #   withHelp(p, s) produces p' where exec(p') = print(s) ; exec(p).
+        #   withHelp({doc=s})(p) produces p' where exec(p') = print(s) ; exec(p).
         #   withHelp is a natural transformation that prepends an IO action
         #   while preserving the rest of the program's behaviour.
         # -----------------------------------------------------------------------
         withHelp =
           {
             pkgs,
-            pkg,
             doc,
           }:
+          pkg:
           let
             name = pkg.meta.mainProgram or (builtins.parseDrvName pkg.name).name;
           in
@@ -153,12 +166,14 @@
           '';
 
         # -----------------------------------------------------------------------
-        # withUnexecuted : Package -> Package
+        # withUnexecuted : { pkgs } -> Package -> Package
         #
         # Plain English:
-        #   Produces a new package named "<original>-help" whose sole purpose
-        #   is to print the command that *would* be executed — but never
-        #   actually runs it. Useful for introspecting wrapped commands.
+        #   Config-first and curried. Given { pkgs }, returns a
+        #   Package -> Package wrapper. Applied to a package, produces a new
+        #   package named "<original>-help" whose sole purpose is to print the
+        #   command that *would* be executed — but never actually runs it.
+        #   Useful for introspecting wrapped commands.
         #
         # Algebraic characterisation:
         #   withUnexecuted is a projection: it maps exec(p) to print(path(p)),
@@ -167,7 +182,8 @@
         #   from Package to String, then lifts back via print.
         # -----------------------------------------------------------------------
         withUnexecuted =
-          { pkgs, pkg }:
+          { pkgs }:
+          pkg:
           let
             name = pkg.meta.mainProgram or (builtins.parseDrvName pkg.name).name;
           in
@@ -176,14 +192,15 @@
           '';
 
         # -----------------------------------------------------------------------
-        # withExpansion : Package -> Package
+        # withExpansion : { pkgs } -> Package -> Package
         #
         # Plain English:
-        #   Wraps a package so that when its executable runs, it first
-        #   recursively discovers every /nix/store path referenced by the
-        #   wrapper scripts, printing the contents of each layer. It
-        #   continues until no new /nix/store paths are found (the fixed
-        #   point), then executes the original command.
+        #   Config-first and curried. Given { pkgs }, returns a
+        #   Package -> Package wrapper. Applied to a package, when its
+        #   executable runs it first recursively discovers every /nix/store
+        #   path referenced by the wrapper scripts, printing the contents of
+        #   each layer. It continues until no new /nix/store paths are found
+        #   (the fixed point), then executes the original command.
         #
         #   This is an introspection tool: it lets you see exactly what
         #   chain of wrapper scripts and store paths compose a given
@@ -200,7 +217,8 @@
         #   withExpansion(p) prints each element of S* before exec(p).
         # -----------------------------------------------------------------------
         withExpansion =
-          { pkgs, pkg }:
+          { pkgs }:
+          pkg:
           let
             name = pkg.meta.mainProgram or (builtins.parseDrvName pkg.name).name;
             entrypoint = "${pkg}/bin/${name}";
@@ -214,12 +232,81 @@
           '';
 
         # -----------------------------------------------------------------------
-        # withTime : Package -> Package
+        # withSource : { pkgs, depth?, execute? } -> Package -> Package
         #
         # Plain English:
-        #   Wraps a package so that it prints the wall-clock start time before
-        #   execution, the stop time after, and the elapsed duration. Useful
-        #   for quick benchmarking of wrapped commands.
+        #   Config-first and curried: you supply a configuration attrset, and
+        #   get back a Package -> Package wrapper. Applied to a package, it
+        #   prints the implementation that *will* be executed — the wrapper
+        #   script's source if it is text (binaries are identified but not
+        #   dumped) — then executes the original command with all arguments
+        #   forwarded.
+        #
+        #   The config-first, package-last order lets you fix a policy once and
+        #   reuse it: `map (withSource { inherit pkgs; }) [ a b c ]`.
+        #
+        #   `depth` controls how far the printout recurses through composed
+        #   /nix/store references:
+        #     depth = null (default) — unfold to the fixed point (every layer
+        #                              of every composed script, infinite).
+        #     depth = 0              — print only the entrypoint script itself.
+        #     depth = N              — print N additional layers of references.
+        #   So for a stack of composed shell scripts (e.g. a writeShellApplication
+        #   that calls other store scripts), the whole composed program is shown.
+        #
+        #   `execute` toggles the effect:
+        #     execute = true  (default) — print, then exec the real command.
+        #     execute = false           — print only; show the would-be-executed
+        #                                 program without running it (dry run).
+        #
+        # Algebraic characterisation:
+        #   withSource generalises both withExpansion and withUnexecuted. Reusing
+        #   the expansion sequence Sₙ from withExpansion, withSource prints the
+        #   truncation S_min(depth, *) (the fixed point when depth = null), then:
+        #     execute = true  => exec(p)         (print ; exec)
+        #     execute = false => skip(p)         (print ; ∅)
+        #   Currying config before the package mirrors withHelps' partial-
+        #   application order, so a configured wrapper is itself a reusable
+        #   endofunctor on Package.
+        # -----------------------------------------------------------------------
+        withSource =
+          {
+            pkgs,
+            depth ? null,
+            execute ? true,
+          }:
+          pkg:
+          let
+            name = pkg.meta.mainProgram or (builtins.parseDrvName pkg.name).name;
+            entrypoint = "${pkg}/bin/${name}";
+            depthArg = if depth == null then "" else toString depth;
+            tail =
+              if execute then
+                ''
+                  echo "=== executing ==="
+                  exec ${entrypoint} "$@"
+                ''
+              else
+                ''
+                  echo "=== print-only; not executing ==="
+                '';
+          in
+          pkgs.writeShellScriptBin name ''
+            ${expansionKernel pkgs.gnugrep}
+
+            __expand ${pkgs.lib.escapeShellArg entrypoint} ${pkgs.lib.escapeShellArg depthArg}
+            ${tail}
+          '';
+
+        # -----------------------------------------------------------------------
+        # withTime : { pkgs } -> Package -> Package
+        #
+        # Plain English:
+        #   Config-first and curried. Given { pkgs }, returns a
+        #   Package -> Package wrapper. Applied to a package, it prints the
+        #   wall-clock start time before execution, the stop time after, and
+        #   the elapsed duration. Useful for quick benchmarking of wrapped
+        #   commands.
         #
         # Algebraic characterisation:
         #   Let exec(p) denote the side-effect of running package p with exit
@@ -231,7 +318,8 @@
         #   identity on the exit-code component).
         # -----------------------------------------------------------------------
         withTime =
-          { pkgs, pkg }:
+          { pkgs }:
+          pkg:
           let
             name = pkg.meta.mainProgram or (builtins.parseDrvName pkg.name).name;
           in
@@ -317,15 +405,17 @@
           '';
 
         # -----------------------------------------------------------------------
-        # withEnv : Package × (String -> Bool)? × Descriptions? -> Package
+        # withEnv : { pkgs, filter?, descriptions? } -> Package -> Package
         #
         # Plain English:
-        #   Wraps a package so that when its executable runs, it first prints
-        #   all environment variables (one per line, sorted), then executes
-        #   the original command. An optional filter predicate controls which
-        #   variables are shown. An optional descriptions attrset provides
-        #   inline help: for each key whose `var` matches a printed variable,
-        #   a comment with `desc` is printed on the line above.
+        #   Config-first and curried. Given { pkgs, filter?, descriptions? },
+        #   returns a Package -> Package wrapper. Applied to a package, when its
+        #   executable runs it first prints all environment variables (one per
+        #   line, sorted), then executes the original command. An optional
+        #   filter predicate controls which variables are shown. An optional
+        #   descriptions attrset provides inline help: for each key whose `var`
+        #   matches a printed variable, a comment with `desc` is printed on the
+        #   line above.
         #
         #   descriptions format: { <key> = { var = "VAR_NAME"; desc = "..."; }; ... }
         #
@@ -341,10 +431,10 @@
         withEnv =
           {
             pkgs,
-            pkg,
             filter ? null,
             descriptions ? { },
           }:
+          pkg:
           let
             name = pkg.meta.mainProgram or (builtins.parseDrvName pkg.name).name;
 
@@ -423,6 +513,7 @@
             mkHelpPkg
             withUnexecuted
             withExpansion
+            withSource
             withTime
             withEnv
             ;
@@ -477,38 +568,40 @@
           # withHelp example: hello with a doc banner
           hello-with-doc = withHelp {
             inherit pkgs;
-            pkg = pkgs.hello;
             doc = "GNU Hello — prints a greeting message.";
-          };
+          } pkgs.hello;
 
           # withUnexecuted example: show hello's real path
-          hello-help = withUnexecuted {
-            inherit pkgs;
-            pkg = pkgs.hello;
-          };
+          hello-help = withUnexecuted { inherit pkgs; } pkgs.hello;
 
           # withExpansion example: inspect store layers of hello
-          hello-with-expansion = withExpansion {
+          hello-with-expansion = withExpansion { inherit pkgs; } pkgs.hello;
+
+          # withSource example: print hello's full composed source, then run it
+          hello-with-source = withSource { inherit pkgs; } pkgs.hello;
+
+          # withSource example: print only the entrypoint script, then run it
+          hello-with-source-shallow = withSource {
             inherit pkgs;
-            pkg = pkgs.hello;
-          };
+            depth = 0;
+          } pkgs.hello;
+
+          # withSource example: dry run — show the would-be-executed program,
+          # but do not execute it
+          hello-with-source-dryrun = withSource {
+            inherit pkgs;
+            execute = false;
+          } pkgs.hello;
 
           # withTime example: time hello's execution
-          hello-with-time = withTime {
-            inherit pkgs;
-            pkg = pkgs.hello;
-          };
+          hello-with-time = withTime { inherit pkgs; } pkgs.hello;
 
           # withEnv example: print all env vars before hello
-          hello-with-env = withEnv {
-            inherit pkgs;
-            pkg = pkgs.hello;
-          };
+          hello-with-env = withEnv { inherit pkgs; } pkgs.hello;
 
           # withEnv example with filter and descriptions
           hello-with-env-filtered = withEnv {
             inherit pkgs;
-            pkg = pkgs.hello;
             filter =
               name:
               builtins.elem name [
@@ -540,17 +633,13 @@
                 desc = "Terminal type identifier";
               };
             };
-          };
+          } pkgs.hello;
 
           # Composition example: withHelp on top of withExpansion
           hello-composed = withHelp {
             inherit pkgs;
-            pkg = withExpansion {
-              inherit pkgs;
-              pkg = pkgs.hello;
-            };
             doc = "Composed: expansion + doc on GNU Hello.";
-          };
+          } (withExpansion { inherit pkgs; } pkgs.hello);
 
           # withHelps + mkHelpPkg example: auto-generated help from documented derivations
           demo-help =

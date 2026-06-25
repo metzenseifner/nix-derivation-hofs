@@ -271,7 +271,7 @@
         # -----------------------------------------------------------------------
         withSource =
           {
-            pkgs,
+            pkgs, # mandatory constructor we depend on to create wrapper derivation
             depth ? null,
             execute ? true,
           }:
@@ -283,12 +283,12 @@
             tail =
               if execute then
                 ''
-                  echo "=== executing ==="
+                  echo "=== execute=${execute}; executing ==="
                   exec ${entrypoint} "$@"
                 ''
               else
                 ''
-                  echo "=== print-only; not executing ==="
+                  echo "=== execute=${execute}; print-only; not executing ==="
                 '';
           in
           pkgs.writeShellScriptBin name ''

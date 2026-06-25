@@ -283,12 +283,12 @@
             tail =
               if execute then
                 ''
-                  echo "=== execute=${execute}; executing ==="
+                  echo "=== execute=${builtins.toString execute}; executing ==="
                   exec ${entrypoint} "$@"
                 ''
               else
                 ''
-                  echo "=== execute=${execute}; print-only; not executing ==="
+                  echo "=== execute=${builtins.toString execute}; print-only; not executing ==="
                 '';
           in
           pkgs.writeShellScriptBin name ''
